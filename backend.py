@@ -1,8 +1,12 @@
+from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io import wavfile
+import os
+
+app = Flask(__name__)
 
 # Initialize recognizer
 recognizer = sr.Recognizer()
@@ -23,20 +27,15 @@ def audio_to_text(audio_file, language='en-US'):
     try:
         with sr.AudioFile(audio_file) as source:
             audio = recognizer.record(source)
-        print("Audio successfully read from file.")
         try:
             text = recognizer.recognize_google(audio, language=language)
-            print(f"Recognized text: {text}")
             return text
         except sr.UnknownValueError:
-            print("Google Speech Recognition could not understand audio")
-            return None
+            return "Google Speech Recognition could not understand audio"
         except sr.RequestError as e:
-            print(f"Could not request results from Google Speech Recognition service; {e}")
-            return None
+            return f"Could not request results from Google Speech Recognition service; {e}"
     except Exception as e:
-        print(f"Failed to read audio file: {e}")
-        return None
+        return f"Failed to read audio file: {e}"
 
 def detect_keywords(transcription, keywords):
     """
@@ -55,8 +54,6 @@ def detect_keywords(transcription, keywords):
                 keyword_intervals.append((keyword, start, end))
                 detected_keywords.append(keyword)
                 keyword_positions[keyword].append((start, end))
-            else:
-                print(f"Keyword '{keyword}' not found.")
     return keyword_intervals, detected_keywords, keyword_positions
 
 def compute_accuracy(detected_keywords, keywords):
@@ -102,20 +99,15 @@ def plot_waveform_with_keywords(audio_file, keyword_intervals_in_time):
     """
     Plot the waveform of the audio file with highlighted keyword intervals.
     """
-    # Read the audio file
     sample_rate, data = wavfile.read(audio_file)
-    data = data.astype(float)  # Convert data to float for better plotting
-    
-    # Time axis
+    data = data.astype(float)
     N = len(data)
     T = 1.0 / sample_rate
     x = np.linspace(0.0, N*T, N)
     
-    # Plot the waveform
     plt.figure(figsize=(12, 8))
     plt.plot(x, data, label='Waveform', color='b')
 
-    # Highlight keyword intervals
     for keyword, start, end in keyword_intervals_in_time:
         plt.axvspan(start, end, color='yellow', alpha=0.5, label=f'Keyword: {keyword}')
     
@@ -124,59 +116,56 @@ def plot_waveform_with_keywords(audio_file, keyword_intervals_in_time):
     plt.ylabel('Amplitude')
     
     plt.tight_layout()
-    plt.show()
+    plt.savefig('waveform_plot.png')  # Save plot as an image
+    plt.close()
 
-def main(input_audio_file, output_audio_file, keywords, language='en-US'):
-    """
-    Main function to preprocess the audio file, convert to text, detect keywords, and analyze audio.
-    """
-    # Preprocess the audio file
-    preprocess_audio(input_audio_file, output_audio_file)
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    language = request.form.get('language', 'en-US')
+    keywords = request.form.get('keywords', '').split(',')
+
+    if not file:
+        return jsonify({'error': 'No file part'}), 400
+
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    # Save the file locally
+    file_path = f'./{file.filename}'
+    file.save(file_path)
+    
+    output_file = "processed_audio.wav"
+    preprocess_audio(file_path, output_file)
     
     # Convert audio to text
-    transcription = audio_to_text(output_audio_file, language)
+    transcription = audio_to_text(output_file, language)
     
     if transcription:
-        print(f"Transcription: {transcription}")
-        # Check if the keywords are present in the transcription
         keyword_intervals, detected_keywords, keyword_positions = detect_keywords(transcription, keywords)
-        
-        # Compute overall accuracy
         precision, recall, f1_score = compute_accuracy(detected_keywords, keywords)
-        print(f"Overall Precision: {precision:.2f}")
-        print(f"Overall Recall: {recall:.2f}")
-        print(f"Overall F1 Score: {f1_score:.2f}")
-
-        # Compute individual keyword metrics
         keyword_metrics = compute_individual_keyword_metrics(keyword_positions, keywords)
-        for keyword, metrics in keyword_metrics.items():
-            print(f"Keyword '{keyword}':")
-            print(f"  Precision: {metrics['precision']:.2f}")
-            print(f"  Recall: {metrics['recall']:.2f}")
-            print(f"  F1 Score: {metrics['f1_score']:.2f}")
-            print(f"  True Positives: {metrics['true_positives']}")
-            print(f"  False Positives: {metrics['false_positives']}")
-            print(f"  False Negatives: {metrics['false_negatives']}")
-        
-        # Calculate total duration of the audio in seconds
-        sample_rate, _ = wavfile.read(output_audio_file)
+
+        sample_rate, _ = wavfile.read(output_file)
         audio_duration = len(_) / sample_rate
-        
-        # Convert keyword intervals to audio time
         keyword_intervals_in_time = [(keyword, start / len(transcription) * audio_duration, (end) / len(transcription) * audio_duration) for keyword, start, end in keyword_intervals]
         
-        # Plot the waveform with keyword intervals
-        plot_waveform_with_keywords(output_audio_file, keyword_intervals_in_time)
+        plot_waveform_with_keywords(output_file, keyword_intervals_in_time)
         
-        # Print the timestamps of the keywords
-        for keyword, start, end in keyword_intervals_in_time:
-            print(f"Keyword '{keyword}' found between {start:.2f} and {end:.2f} seconds.")
+        results = {
+            'transcription': transcription,
+            'overall_precision': precision,
+            'overall_recall': recall,
+            'overall_f1_score': f1_score,
+            'keyword_metrics': keyword_metrics,
+            'keyword_intervals': keyword_intervals_in_time
+        }
+        return jsonify(results)
     else:
-        print("No transcription available. Check if the audio file contains clear speech and is in a compatible format.")
+        return jsonify({'error': 'No transcription available'}), 500
 
-# Example usage
-input_audio_file = "Telugu_Voice.mp3"  # Specify your file path
-output_audio_file = "processed_audio.wav"
-keywords = ["నీ రాజ్"]  # List of keywords to detect
-language = 'te'  # Specify the language code
-main(input_audio_file, output_audio_file, keywords, language)
+if __name__ == '__main__':
+    app.run(debug=True)
